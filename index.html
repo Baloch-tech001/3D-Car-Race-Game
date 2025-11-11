@@ -1,0 +1,311 @@
+import React, { useRef, useState, useEffect, useMemo } from "react";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Html, OrbitControls, Sky, useGLTF } from "@react-three/drei";
+import * as THREE from "three";
+
+// --- Model definition ---
+// This is a common public domain low-poly car model used for R3F examples.
+// You would replace this with the path to your own car.glb file.
+const CAR_MODEL_PATH = "https://vazxmixjsiawhamofees.s3.amazonaws.com/models/Porsche-911-GT2/glTF/porsche.gltf";
+
+
+// Simple 3D Car Racer
+// Single-file React component. Drop into a React app with
+// dependencies: react, react-dom, @react-three/fiber, three, @react-three/drei, framer-motion, tailwindcss
+
+export default function CarRacerApp() {
+  return (
+    <div className="w-screen h-screen bg-gradient-to-b from-slate-900 to-slate-800 text-white">
+      <div className="absolute inset-0 pointer-events-none">
+        <Canvas shadows camera={{ position: [0, 6, 12], fov: 50 }}>
+          <Scene />
+        </Canvas>
+      </div>
+
+      <HUD />
+    </div>
+  );
+}
+
+// --- Global game state (simple shared state using module scope) ---
+let scoreSub = null;
+let gameStateSub = null;
+let restartSub = null;
+const gameState = {
+  running: true,
+  score: 0,
+  gameOver: false,
+};
+function setScore(s) {
+  gameState.score = s;
+  if (scoreSub) scoreSub(s);
+}
+function setGameOver(flag) {
+  gameState.gameOver = flag;
+  gameState.running = !flag;
+  if (gameStateSub) gameStateSub({ ...gameState });
+}
+function resetGame() {
+  gameState.running = true;
+  gameState.score = 0;
+  gameState.gameOver = false;
+  if (restartSub) restartSub();
+  if (scoreSub) scoreSub(0);
+  if (gameStateSub) gameStateSub({ ...gameState });
+}
+
+// --- Component to load and render the GLTF car model ---
+function CarModel({ color = "#ff3b3b", scale = 0.005, rotationY = 0 }) {
+    // Load the model using Drei's useGLTF
+    const { scene } = useGLTF(CAR_MODEL_PATH);
+
+    // useMemo helps clone the scene once to prevent it from being shared between instances
+    const clonedScene = useMemo(() => {
+        const c = scene.clone();
+        c.traverse((child) => {
+            if (child.isMesh) {
+                // Apply a simple color override to the material for variety
+                child.material = new THREE.MeshStandardMaterial({
+                    color: color,
+                    metalness: 0.3,
+                    roughness: 0.5
+                });
+                child.castShadow = true;
+                child.receiveShadow = true;
+            }
+        });
+        return c;
+    }, [color]);
+
+    // Adjustments needed for this specific model (scaling and rotation)
+    return <primitive object={clonedScene} scale={scale} rotation-y={rotationY} />;
+}
+
+// --- Scene containing road, player, enemy spawner and lights ---
+function Scene() {
+  return (
+    <>
+      <ambientLight intensity={0.6} />
+      <directionalLight castShadow position={[5, 10, 5]} intensity={1} shadow-mapSize-width={1024} shadow-mapSize-height={1024} />
+      <Sky sunPosition={[100, 20, 100]} />
+
+      <Road />
+      <PlayerCar />
+      <EnemyManager />
+
+      <mesh rotation-x={-Math.PI / 2} receiveShadow position={[0, -0.001, 0]}>
+        <planeGeometry args={[200, 200]} />
+        <meshStandardMaterial color="#0b0b0b" />
+      </mesh>
+
+      <OrbitControls enablePan={false} enableZoom={false} maxPolarAngle={Math.PI / 2.2} minPolarAngle={Math.PI / 2.2} />
+    </>
+  );
+}
+
+function Road() {
+  // Repeating road stripes
+  const stripes = useMemo(() => new Array(200).fill(0).map((_, i) => ({ z: -i * 4 })), []);
+  return (
+    <group>
+      {/* road surface */}
+      <mesh position={[0, 0.01, 0]} rotation-x={-Math.PI / 2} receiveShadow>
+        <planeGeometry args={[12, 400]} />
+        <meshStandardMaterial color="#222" metalness={0.1} roughness={0.9} />
+      </mesh>
+
+      {/* lane lines */}
+      {stripes.map((s, i) => (
+        <mesh key={i} position={[0, 0.02, s.z]}>
+          <boxGeometry args={[0.3, 0.05, 2.5]} />
+          <meshStandardMaterial color="#fff" />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+// Player car component
+function PlayerCar() {
+  const ref = useRef();
+  const { camera } = useThree();
+  const posRef = useRef(new THREE.Vector3(0, 0.5, 6));
+  const speedRef = useRef(0);
+  const targetX = useRef(0);
+
+  useEffect(() => {
+    // simple keyboard controls
+    function handleKey(e) {
+      if (gameState.gameOver) return;
+      if (e.key === "ArrowLeft" || e.key === "a") targetX.current = Math.max(targetX.current - 1.5, -4);
+      if (e.key === "ArrowRight" || e.key === "d") targetX.current = Math.min(targetX.current + 1.5, 4);
+      if (e.key === "ArrowUp" || e.key === "w") speedRef.current = Math.min(speedRef.current + 0.02, 0.6);
+      if (e.key === "ArrowDown" || e.key === "s") speedRef.current = Math.max(speedRef.current - 0.02, -0.2);
+    }
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, []);
+
+  useFrame((state, delta) => {
+    if (!gameState.running) return;
+    // smooth lateral movement
+    posRef.current.x += (targetX.current - posRef.current.x) * Math.min(10 * delta, 1);
+    // forward/backward speed effect
+    posRef.current.z -= 6 * delta + speedRef.current * 20 * delta;
+
+    // Keep player roughly near camera
+    posRef.current.z = Math.max(-10, Math.min(10, posRef.current.z));
+
+    ref.current.position.copy(posRef.current);
+    ref.current.rotation.y = (targetX.current - posRef.current.x) * 0.2; // Bank the car
+
+    // move camera smoothly to follow
+    camera.position.lerp(new THREE.Vector3(0, 6, posRef.current.z + 6), 0.05);
+    camera.lookAt(posRef.current.x, 0.5, posRef.current.z - 6);
+  });
+
+  // The bounding box needs to be manually sized to cover the car model.
+  return (
+    <group ref={ref} position={[0, 0.5, 6]}>
+      {/* The visual car model */}
+      <CarModel color="#ff3b3b" rotationY={Math.PI / 2} /> 
+
+      {/* Collision Box (invisible, sized for the model) */}
+      <mesh position={[0, 0.1, 0]} visible={false} name="PLAYER_MARKER">
+         {/* We keep the box geometry for collision detection, but make it invisible */}
+        <boxGeometry args={[1.4, 0.8, 2.8]} /> 
+        <meshBasicMaterial visible={false} />
+      </mesh>
+    </group>
+  );
+}
+
+// Enemy manager spawns cars ahead moving toward player
+function EnemyManager() {
+  const enemiesRef = useRef([]);
+  const spawnTimer = useRef(0);
+  const groupRef = useRef();
+
+  // subscription: when restart happens, clear enemies
+  useEffect(() => {
+    restartSub = () => {
+      enemiesRef.current = [];
+    };
+    return () => {
+      restartSub = null;
+    };
+  }, []);
+
+  useFrame((state, delta) => {
+    if (!gameState.running) return;
+    spawnTimer.current += delta;
+    // spawn frequency scales with score
+    const spawnEvery = Math.max(0.6 - Math.min(gameState.score * 0.02, 0.45), 0.25);
+    if (spawnTimer.current > spawnEvery) {
+      spawnTimer.current = 0;
+      const laneX = [-3.5, -1.5, 0, 1.5, 3.5][Math.floor(Math.random() * 5)];
+      const z = state.camera.position.z - 60 - Math.random() * 40;
+      const speed = 6 + Math.random() * 6 + Math.min(gameState.score, 30) * 0.5;
+      enemiesRef.current.push({ id: Math.random(), x: laneX, z, speed, passed: false, color: `#${Math.floor(Math.random()*16777215).toString(16)}` });
+    }
+
+    // update enemies
+    for (let i = enemiesRef.current.length - 1; i >= 0; i--) {
+      const e = enemiesRef.current[i];
+      e.z += e.speed * delta;
+      // if enemy passes behind player -> increase score once
+      if (!e.passed && e.z > state.camera.position.z + 8) {
+        e.passed = true;
+        setScore(gameState.score + 1);
+      }
+      // remove too-far enemies
+      if (e.z > state.camera.position.z + 40) enemiesRef.current.splice(i, 1);
+    }
+
+    // collision detection
+    // find player marker
+    const player = groupRef.current?.getObjectByName("PLAYER_MARKER");
+    if (player) {
+      // Get the bounding box of the invisible collision mesh on the player
+      const playerBox = new THREE.Box3().setFromObject(player);
+      for (let e of enemiesRef.current) {
+        // build box for enemy (same dimensions as the collision box used for player)
+        const enemyBox = new THREE.Box3();
+        const center = new THREE.Vector3(e.x, 0.5, e.z);
+         // Note: The enemy box must be slightly bigger to account for the model size
+        enemyBox.setFromCenterAndSize(center, new THREE.Vector3(1.6, 1.2, 3)); 
+        if (playerBox.intersectsBox(enemyBox)) {
+          // game over
+          setGameOver(true);
+        }
+      }
+    }
+  });
+
+  return (
+    <group ref={groupRef}>
+      {enemiesRef.current.map((e) => (
+        <EnemyCar key={e.id} x={e.x} z={e.z} color={e.color} />
+      ))}
+    </group>
+  );
+}
+
+function EnemyCar({ x, z, color }) {
+  // simple visual for enemy cars - now using the CarModel
+  return (
+    <group position={[x, 0.5, z]}>
+      {/* Use the CarModel component for a detailed visual */}
+      <CarModel color={color} rotationY={Math.PI / 2} />
+    </group>
+  );
+}
+
+// HUD component outside of canvas
+function HUD() {
+  const [score, setScoreLocal] = useState(gameState.score);
+  const [stateSnapshot, setStateSnapshot] = useState({ ...gameState });
+
+  useEffect(() => {
+    scoreSub = (s) => setScoreLocal(s);
+    gameStateSub = (s) => setStateSnapshot(s);
+    return () => {
+      scoreSub = null;
+      gameStateSub = null;
+    };
+  }, []);
+
+  return (
+    <div className="absolute inset-0 pointer-events-none flex flex-col">
+      <div className="p-4 flex justify-between items-center pointer-events-auto">
+        <div className="bg-black/40 px-4 py-2 rounded-md shadow-md">Score: <strong className="ml-2">{score}</strong></div>
+        <div className="bg-black/40 px-4 py-2 rounded-md shadow-md flex gap-2">
+          <button
+            onClick={() => resetGame()}
+            className="bg-green-500 text-black px-3 py-1 rounded shadow"
+          >
+            Restart
+          </button>
+          <div className="text-sm opacity-80">Use ← → or A D to steer. ↑/↓ to adjust speed.</div>
+        </div>
+      </div>
+
+      {stateSnapshot.gameOver && (
+        <div className="mx-auto mt-20 bg-white/5 backdrop-blur-sm max-w-xl p-6 rounded-2xl pointer-events-auto text-center">
+          <h2 className="text-3xl font-bold">Game Over</h2>
+          <p className="mt-3 text-lg">Your score: <strong>{stateSnapshot.score}</strong></p>
+          <div className="mt-4">
+            <button
+              onClick={() => resetGame()}
+              className="bg-indigo-500 px-4 py-2 rounded text-white"
+            >
+              Play again
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+// Preload the model for better performance
+useGLTF.preload(CAR_MODEL_PATH)
